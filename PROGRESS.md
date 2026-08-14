@@ -2,7 +2,7 @@
 
 Running status log. See `ARCHITECTURE.md` for design decisions and the phase plan (§13).
 
-**Current state: Phase 3 complete.**
+**Current state: Phase 4 complete. All four phases done.**
 
 ---
 
@@ -378,10 +378,63 @@ mistreats an unrecognized status as success.
   rediscover and "fix" later without a genuinely new design discussion —
   same treatment as Phase 2's clock+watermark co-tampering limitation.
 - The Phase 2 carry-forward item about documenting clock+watermark
-  co-tampering in ARCHITECTURE.md is still pending, still needs explicit
-  user approval before editing — not touched this phase either.
+  co-tampering in ARCHITECTURE.md is already resolved — §7's "A related,
+  structurally similar limitation" paragraph covers it. (Corrected here;
+  an earlier version of this line incorrectly called it still pending.)
 - `refresh()`'s `STALE_TOKEN_REPLAY`/`INSTALLATION_ID_MISMATCH`/
   `MALFORMED_RESPONSE` are synthetic `KeyforgeApiError` codes (not from
   Keyforge's own error vocabulary) — if `index.js` or the README ever
   document a full error-code table for integrators, these three need to be
   called out as client-side-detected, not server-reported.
+
+---
+
+## Phase 4 — Public API surface (`index.js`) + README ✅
+
+Composed the four independent Phase 2-3 factories into one public entry
+point, `src/index.js`'s `createKeyforgeClient(config)` — a single async
+factory that constructs `createActivateClient`/`createEntitlementChecker`/
+`createRefreshClient`/`createDeactivateClient` once via `Promise.all` over
+one shared config object, and returns `{ activate, getEntitlement, refresh,
+deactivate }` bound directly to each factory's own method. Added
+`README.md` (didn't exist before this phase) covering quick-start usage,
+configuration, `installationFingerprint`'s behavior, a full status/error
+vocabulary table, the revocation-propagation caveat, and the accepted-
+limitations list. Also corrected a stale carry-forward line from this same
+Phase 3 section (see above): the clock+watermark co-tampering
+ARCHITECTURE.md addition was already present in §7, not still pending as
+previously stated here. This is the final phase per ARCHITECTURE.md §13.
+
+Verified end-to-end:
+
+- `npm test` — 118 passing across 10 files (was 114 after Phase 3)
+- `npm run lint` / `npm run format:check` — clean
+- Manual sanity script (ad hoc, deleted after): real `createJsonFileAdapter`
+  on disk (temp dir), real crypto, mocked fetch, exercising
+  `createKeyforgeClient`'s full `activate → getEntitlement(valid) → refresh
+  → getEntitlement(valid, refreshed) → refresh(revoked) →
+  replayed-refresh-rejection → deactivate → getEntitlement(not_activated)`
+  cycle, confirming `installationFingerprint` survives `deactivate()`
+
+### Decisions made during Phase 4
+
+| Decision | Rationale |
+|---|---|
+| **`createKeyforgeClient(config)`, a single named async export, no default export** | Matches every other `src/` module's `create*` named-export convention. `package.json`'s `"exports": "./src/index.js"` is a bare string, so `index.js` is the only externally-reachable file regardless — kept its surface minimal and matching ARCHITECTURE.md §4 exactly (activate/getEntitlement/refresh/deactivate only, no re-exporting the four sub-factories separately). |
+| **`storage` defaults to `createJsonFileAdapter()` when omitted; `publicKeys`/`baseUrl` have no default (required)** | User-approved (of two proposed options). Continues CLAUDE.md's already-settled "default storage is a plain JSON file" decision up to the composed-client level, so the README's quick-start example is genuinely zero-config beyond `publicKeys`/`baseUrl`. `getNow`/`fetchImpl` stay optional per-sub-factory defaults, passed through as literal `undefined` when omitted (each sub-factory's own default parameter fires on `undefined`, not just on the key being absent). |
+| **No outer `= {}` guard on `createKeyforgeClient`'s parameter** | None of the four existing factories defend against zero-arg calls either — a raw destructuring `TypeError` on `createKeyforgeClient()` is consistent with existing behavior, not a regression. |
+| **`.keyforge-client/` added to `.gitignore`** | The new default-storage path means a zero-config `createKeyforgeClient()` call (e.g. manual testing from repo root) now materializes that directory; wasn't previously ignored since nothing defaulted to creating it before this phase. |
+| **New integration test `tests/integration/index.test.js`, using `createMemoryAdapter()`** (matching all three existing integration test files) plus one dedicated real-disk scenario for the new default-storage path (temp dir + `process.chdir()`, restored/cleaned in `finally`) | Confirms the one thing no per-function test covered: that all four bound functions returned by one `createKeyforgeClient()` call genuinely share the same storage instance through a real `activate → getEntitlement → refresh → getEntitlement → deactivate → getEntitlement` chain, plus a revoked-path variant and a required-field-validation check. |
+| **README's error/status table explicitly separates `getEntitlement()`'s 7 status strings, `KeyforgeApiError`'s 3 synthetic (client-detected) codes, and its server-reported codes into three distinct sub-sections** | Directly closes the Phase 3 carry-forward note: integrators shouldn't go looking for `STALE_TOKEN_REPLAY`/`INSTALLATION_ID_MISMATCH`/`MALFORMED_RESPONSE` in Keyforge server's own docs and fail to find them. |
+| **Accepted-limitations section in the README points to `PROGRESS.md` rather than re-explaining each item** | Matches the task's explicit instruction — brief pointer, not a re-derivation of Phase 2/3's security review findings. |
+
+### Carry-forward — none; project complete
+
+All four phases of ARCHITECTURE.md §13 are done. No open design questions
+remain (§15's three were resolved across Phases 1-2). The accepted
+limitations documented across Phases 2-4 (clock+watermark co-tampering,
+revocation-propagation bound, unbounded response body size, multi-write
+non-atomicity, `installationFingerprint`-seeding TOCTOU, the narrow
+concurrent-`getEntitlement()` watermark race) are deliberate, documented
+trade-offs — not bugs for a future session to rediscover and "fix" without
+a genuinely new design discussion first.
