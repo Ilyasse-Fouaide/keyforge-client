@@ -303,6 +303,77 @@ describe('getEntitlement (offline-flow composition)', () => {
     });
   });
 
+  describe('revoked flag (Phase 3)', () => {
+    it('reports revoked and short-circuits before touching the clock or the token, when the flag is set', async () => {
+      const claims = buildEntitlementPayload();
+      const jws = await signTestToken(claims, { privateKey: keyPair.privateKey, kid: '1' });
+      await storage.set('entitlementToken', jws);
+      // Deliberately no lastValidatedAt at all — a normal check would fail
+      // closed with clock_rollback; revoked must win regardless.
+      await storage.set('revoked', 'true');
+
+      const { getEntitlement } = await createChecker({ getNow: () => claims.issuedAt });
+
+      await expect(getEntitlement()).resolves.toEqual({ status: 'revoked' });
+      await expect(storage.get('lastValidatedAt')).resolves.toBeNull();
+    });
+
+    it('does not report revoked when the flag is absent', async () => {
+      const claims = buildEntitlementPayload();
+      const jws = await signTestToken(claims, { privateKey: keyPair.privateKey, kid: '1' });
+      await storage.set('entitlementToken', jws);
+      await storage.set('lastValidatedAt', String(claims.issuedAt - 10));
+
+      const { getEntitlement } = await createChecker({ getNow: () => claims.issuedAt });
+
+      await expect(getEntitlement()).resolves.toMatchObject({ status: 'valid' });
+    });
+  });
+
+  describe('installationId check (Phase 3)', () => {
+    it('reports tampered for a validly-signed, unexpired token issued to a different installation', async () => {
+      const claims = buildEntitlementPayload({ installationId: 'inst_this_device' });
+      const jws = await signTestToken(claims, { privateKey: keyPair.privateKey, kid: '1' });
+      await storage.set('entitlementToken', jws);
+      await storage.set('lastValidatedAt', String(claims.issuedAt - 10));
+      // Simulates activate() having recorded a DIFFERENT installationId
+      // than the one embedded in this (otherwise perfectly valid) token —
+      // e.g. this token file was copied from another device.
+      await storage.set('installationId', 'inst_other_device');
+
+      const { getEntitlement } = await createChecker({ getNow: () => claims.issuedAt });
+
+      await expect(getEntitlement()).resolves.toEqual({ status: 'tampered' });
+    });
+
+    it('reports valid when the token installationId matches the stored one', async () => {
+      const claims = buildEntitlementPayload({ installationId: 'inst_this_device' });
+      const jws = await signTestToken(claims, { privateKey: keyPair.privateKey, kid: '1' });
+      await storage.set('entitlementToken', jws);
+      await storage.set('lastValidatedAt', String(claims.issuedAt - 10));
+      await storage.set('installationId', 'inst_this_device');
+
+      const { getEntitlement } = await createChecker({ getNow: () => claims.issuedAt });
+
+      await expect(getEntitlement()).resolves.toEqual({
+        status: 'valid',
+        expiresAt: claims.expiresAt,
+        features: claims.features,
+      });
+    });
+
+    it('reports valid when no installationId has ever been stored (pre-Phase-3 state)', async () => {
+      const claims = buildEntitlementPayload();
+      const jws = await signTestToken(claims, { privateKey: keyPair.privateKey, kid: '1' });
+      await storage.set('entitlementToken', jws);
+      await storage.set('lastValidatedAt', String(claims.issuedAt - 10));
+
+      const { getEntitlement } = await createChecker({ getNow: () => claims.issuedAt });
+
+      await expect(getEntitlement()).resolves.toMatchObject({ status: 'valid' });
+    });
+  });
+
   describe('unexpected storage errors', () => {
     let tempDir;
 

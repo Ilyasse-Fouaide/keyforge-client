@@ -30,6 +30,19 @@ export async function createEntitlementChecker({ storage, publicKeys, getNow = d
       return { status: 'not_activated' };
     }
 
+    // A server-reported revocation (set by refresh() on a 403 entitlement-
+    // failure response — Phase 3) short-circuits everything else: a still-
+    // validly-signed, still-unexpired token tells us nothing about
+    // revocation that happened after the last successful refresh()
+    // (ARCHITECTURE.md §7), so once refresh() has told us, that verdict
+    // wins over anything the cached token itself would otherwise report. No
+    // clock check, no watermark writes on this path — there's nothing left
+    // to protect once the installation itself is revoked.
+    const revoked = await storage.get('revoked');
+    if (revoked === 'true') {
+      return { status: 'revoked' };
+    }
+
     const now = getNow();
     const storedLastValidatedAt = await storage.get('lastValidatedAt');
     // storage.get() resolves null for a missing key — pass that through as
@@ -67,6 +80,23 @@ export async function createEntitlementChecker({ storage, publicKeys, getNow = d
 
     try {
       const payload = await verifyEntitlementToken(tokenStr, { publicKeysByVersion, now });
+
+      // Reject a validly-signed token that belongs to a DIFFERENT
+      // installation: signature/expiry alone can't distinguish "issued to
+      // this device" from "issued to some other device, and copied here."
+      // installationId is written by activate() (Phase 3) from the same
+      // signed payload this check reads, so a mismatch here means either
+      // the stored value or the token was swapped independently of the
+      // other — collapsed into 'tampered' rather than a new status, same
+      // category as a signature-tampered token (ARCHITECTURE.md §9: don't
+      // invent a parallel vocabulary).
+      const storedInstallationId = await storage.get('installationId');
+      if (
+        storedInstallationId !== null &&
+        String(payload.installationId) !== storedInstallationId
+      ) {
+        return { status: 'tampered' };
+      }
 
       // Reject replay of a superseded (but still validly-signed, still
       // unexpired) token: without this, restoring an old entitlementToken

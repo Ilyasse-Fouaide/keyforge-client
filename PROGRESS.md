@@ -2,7 +2,7 @@
 
 Running status log. See `ARCHITECTURE.md` for design decisions and the phase plan (§13).
 
-**Current state: Phase 2 complete.**
+**Current state: Phase 3 complete.**
 
 ---
 
@@ -221,3 +221,167 @@ out-of-scope per Phase 1's one-process-owns-this-file design).
 - An `ARCHITECTURE.md` addition documenting the clock+watermark limitation
   (see security review finding #2) is proposed but not yet made — needs
   explicit user approval before editing, per this repo's own rule.
+
+---
+
+## Phase 3 — Network operations: activate() / refresh() / deactivate() ✅
+
+Built `createActivateClient`/`createRefreshClient`/`createDeactivateClient`
+(`src/activate.js`, `src/refresh.js`, `src/deactivate.js`), each an
+async-factory matching `entitlement.js`'s existing shape, plus
+`src/network/errors.js` (`KeyforgeApiError`) and `src/network/request.js`
+(shared POST-JSON + error/success body parsing). Closed all four of Phase
+2's carry-forward items: `activate()` now writes the initial
+`lastValidatedAt` watermark, seeds `highestIssuedAtSeen`, stores
+`installationId`, and `entitlement.js` now checks a verified token's
+`installationId` against it; `refresh()` now has a `revoked` storage flag
+`getEntitlement()` checks. Server contract confirmed by reading the real
+Keyforge repo's `docs/client-sdk-integration.md` plus its actual
+route/controller/service source (not just the doc) — see the Confirmed
+design decisions below for what that surfaced. A mandatory fresh-context
+security review (same discipline as Phase 2) found one **critical**,
+PoC-verified issue — a stale-token-replay attack that could clear a real
+revocation — fixed before considering this phase done (details below).
+`index.js`/README remain Phase 4.
+
+Verified end-to-end:
+
+- `npm test` — 114 passing across 9 files (was 81 after Phase 2)
+- `npm run lint` / `npm run format:check` — clean
+- Manual sanity script (ad hoc, deleted after): full
+  `activate → getEntitlement(valid) → refresh → getEntitlement(valid,
+  watermarks advanced) → replayed-response rejection → deactivate →
+  getEntitlement(not_activated)` cycle against the real `createJsonFileAdapter`
+  on disk (not the in-memory fake), confirming `installationFingerprint`
+  survives `deactivate()`.
+
+### Decisions made during Phase 3
+
+| Decision | Rationale |
+|---|---|
+| **Revoked state: single boolean-ish flag**, storage key `'revoked'` = `'true'`, set by `refresh()` on any 403 entitlement-failure response, cleared on the next successful refresh | User-approved (of two proposed options). Lands inside the already-approved §4 status vocabulary — no ARCHITECTURE.md edit needed, matches Phase 2's own preference for collapsing into existing vocabulary over inventing new terms. |
+| **`deactivate()` clears local license state entirely** (`entitlementToken`, `installationToken`, `installationId`, `lastValidatedAt`, `highestIssuedAtSeen`, `revoked`), **keeps `installationFingerprint`** | User-approved. Fingerprint is device identity, not license-activation state — it's meant to persist across a future re-activation per `docs/client-sdk-integration.md`'s own framing ("generated once at first run"). Subsequent `getEntitlement()` reports the existing `not_activated` status; no new vocabulary. |
+| **`installationId` mismatch reports `'tampered'`**, not a new status | User-approved. Same category as a signature-tampered token from this module's perspective — no ARCHITECTURE.md edit needed, same pattern as Phase 2's stale-token-replay finding. |
+| **`refresh()` treats 429 `RATE_LIMITED` identically to network-unreachable** — silent no-op, no throw, no state change | User-approved. Rate limiting is a "try again later" signal, not a real error; `refresh()`'s contract already requires never throwing for expected transient conditions. |
+| **`installationId` is server-generated, `installationFingerprint` is client-generated** — confirmed by reading the real Keyforge repo, not assumed from ARCHITECTURE.md's prose | The task's own carry-forward note left this ambiguous ("from the activation response or generated locally... check docs/client-sdk-integration.md"). The doc and the actual route/controller/service source agree: `installationFingerprint` is a client-persisted UUID sent *to* `/activate`; `installationId` is the server's Activation-document id, returned *from* `/activate` and embedded in the signed token payload. `activate()` generates and persists the fingerprint via `node:crypto`'s `randomUUID()` (no new dependency), reusing it across future `activate()` calls per the server's idempotent-per-fingerprint design. |
+| **No new HTTP client dependency** — global `fetch` (Node engine already `>=24`), injectable as `fetchImpl` for tests | Matches the project's dependency-light philosophy (`jose` is still the only runtime dependency). Test mocking uses a hand-rolled fake `fetchImpl` (`tests/helpers/fakeFetch.js`) rather than `nock`/`msw`. |
+| **`activate()`/`refresh()` verify the received `entitlementToken` locally (same `crypto/verify.js` + `crypto/keys.js` machinery `getEntitlement()` uses) before persisting anything**, and prefer the *verified payload's* fields over the raw response body wherever both exist (`issuedAt`, `expiresAt`, `installationId`) | The core MITM/malicious-server defense: a compromised network path can return arbitrary JSON, but cannot forge a signature that verifies against the configured public keys. Nothing is written to storage until verification succeeds. |
+| **`KeyforgeApiError(status, code, message)`**, one error class for all non-2xx and synthetic (`MALFORMED_RESPONSE`, `INSTALLATION_ID_MISMATCH`, `STALE_TOKEN_REPLAY`) failures, kept separate from `crypto/errors.js`'s `TokenVerificationError` hierarchy | Different failure domain (server rejected the request vs. a token failed local verification) — reuses the server's own `error.code` values verbatim rather than re-deriving a parallel vocabulary (ARCHITECTURE.md §9). |
+| **`activate()`/`refresh()` reject a response whose `payload.issuedAt` is not strictly greater than the stored `highestIssuedAtSeen`** (when one exists), throwing `KeyforgeApiError('STALE_TOKEN_REPLAY', ...)` before any storage write | Added during the security review (see below) — not in the original plan. Closes a replay window neither `activate()` nor `refresh()` had: without it, a MITM/malicious server could replay any previously-captured, still-validly-signed, still-unexpired response to roll state backward, including clearing a `revoked` flag set by a real, later 403. |
+
+### Security review — findings and disposition
+
+A fresh-context adversarial subagent review, scoped specifically to the new
+network-facing surface (`activate.js`/`refresh.js`/`deactivate.js`/`network/`
+plus the `entitlement.js` changes), found:
+
+1. **Fixed — CRITICAL: stale/replayed `/refresh` response could clear a real
+   revocation.** `refresh()` verified the incoming `entitlementToken`'s
+   signature and `installationId`, but never checked whether the token was
+   *newer* than what was already accepted — only whether it should *advance*
+   `highestIssuedAtSeen` (a decision, not a gate). A MITM or malicious server
+   could capture a legitimate, validly-signed `200 /refresh` response, let a
+   real subsequent `403` set `revoked = 'true'`, then replay the captured
+   old response: it still verified, its `issuedAt` didn't trigger the
+   (advance-only) watermark bump, and `refresh()` unconditionally cleared
+   `revoked` and overwrote `entitlementToken` anyway — fully defeating
+   revocation. PoC-confirmed by the reviewer (`getEntitlement()` went from
+   `'revoked'` to `'valid'` purely via replay, no forged signature needed).
+   Fixed by rejecting any response whose `payload.issuedAt` is not strictly
+   greater than the stored `highestIssuedAtSeen` *before* any storage write
+   — `throw KeyforgeApiError('STALE_TOKEN_REPLAY', ...)`. Strictly-greater
+   (not `>=`) rejects exact replays too, since an honest `refresh()` always
+   returns a token with a newer `issuedAt`. Verified by a new regression
+   test (`tests/integration/refresh.test.js`, "rejects a replayed old
+   /refresh response and does NOT clear a revoked flag set since (security
+   review finding)") reproducing the exact attack sequence, plus a
+   re-verification pass of the manual end-to-end script with an explicit
+   replay-rejection step.
+2. **Fixed — MEDIUM: `activate()` had no analogous freshness check.** Same
+   root cause as #1: an already-active installation had no defense against a
+   MITM/malicious server replaying an old, still-valid `/activate` response,
+   which would silently roll `highestIssuedAtSeen` backward (defeating its
+   purpose as `entitlement.js`'s replay-detection floor) and splice in a
+   different `installationId`/`entitlementToken` wholesale. Fixed with the
+   same strictly-greater-than-existing-watermark guard, applied before any
+   write. Only meaningful when a prior watermark already exists — a
+   genuinely fresh device, or one that just ran `deactivate()` (which clears
+   this key), has nothing to compare against yet; that residual gap is the
+   same "absence isn't fail-closed" reasoning already accepted for this
+   field elsewhere (Phase 2), not newly introduced here.
+3. **Fixed — LOW: malformed 2xx body threw a raw `SyntaxError` instead of
+   `KeyforgeApiError`.** `activate()`/`refresh()` called `response.json()`
+   directly on the success path with no try/catch, unlike the already-
+   careful error-body parsing (`apiErrorFromResponse`). A malicious server
+   returning `201`/`200` with an empty or non-JSON body produced an
+   inconsistent error type. Fixed with a shared `parseSuccessBody()` helper
+   in `network/request.js` that converts a JSON-parse failure into
+   `KeyforgeApiError('MALFORMED_RESPONSE', ...)`, mirroring the existing
+   error-path helper.
+4. **Documented as an accepted limitation, not fixed — unbounded response
+   body size.** Nothing caps the size of `entitlementToken`/`installationToken`
+   strings accepted from a response before they're parsed/verified/persisted.
+   No practical exploit exists without the server's private key (a forged
+   giant token still fails signature verification), but the unbounded
+   buffering of attacker-controlled data before rejection is a real memory/
+   CPU amplification vector. No proportionate fix within this module's
+   dependency-light, non-streaming design (a real cap would need
+   content-length/streaming handling this library doesn't otherwise do) —
+   flagged for a future phase if it becomes a concrete concern, not fixed
+   speculatively now.
+5. **Documented as an accepted limitation, not fixed — multi-write,
+   non-transactional persistence sequences.** `activate()`/`refresh()` each
+   issue several independent `storage.set`/`delete` calls; a process killed
+   mid-sequence can leave a legitimately re-activated/refreshed installation
+   reporting `'revoked'` or `'clock_rollback'` until the operation is
+   retried. This fails *closed* (denies access), not open, so it's not an
+   authorization bypass — same shape as Phase 1's already-accepted
+   "in-process serialization only, no cross-call atomicity" limitation, now
+   confirmed to extend to these multi-key write sequences too. The current
+   write ordering (new token first, `revoked` cleared last) is deliberately
+   the safer of the two possible orderings.
+6. **Documented as an accepted limitation, not fixed — TOCTOU on
+   `installationFingerprint` seeding under concurrent `activate()` calls on
+   the same checker instance.** Two concurrent `activate()` invocations could
+   each read a missing fingerprint as `null` and generate different UUIDs,
+   with the second `set()` silently winning. Realistically out of scope:
+   `activate()` is a human-initiated, one-time action, and this is the same
+   single-process-owns-this-file trust model Phase 1 already established for
+   compound (multi-call) operations specifically, as opposed to the
+   single-call atomicity `json-file.js`'s internal queue does guarantee.
+
+Also explicitly investigated and ruled out by the reviewer: prototype-
+pollution/arbitrary-key paths from a server response into storage (both
+files destructure only named fields, never spread unknown keys), algorithm
+confusion (Phase 3 code doesn't touch `verify.js`'s existing `EdDSA` pin),
+`deactivate()`'s response body (ignored entirely on success — a malicious
+`/deactivate` response cannot influence what gets deleted, and
+`installationFingerprint` is correctly excluded from the delete set),
+`deactivate()` not catching fetch failures (confirmed deliberate per its own
+"throws on failure" contract, not a bug), and `refresh()`'s status-code
+dispatch (429/403/200/else) being exhaustive with no fallthrough that
+mistreats an unrecognized status as success.
+
+### Carry-forward — things Phase 4 must not forget
+
+- `index.js` needs to construct all four (`createEntitlementChecker`,
+  `createActivateClient`, `createRefreshClient`, `createDeactivateClient`)
+  once with shared config (`storage`, `publicKeys`, `baseUrl`, optionally
+  `getNow`/`fetchImpl`) and expose the bound functions matching
+  ARCHITECTURE.md §4's literal public signatures.
+- README needs §7's revocation-propagation caveat (already anticipated) plus
+  a note on `installationFingerprint`'s purpose/persistence, since it's now
+  real, user-facing-adjacent behavior (survives `deactivate()`, generated
+  transparently on first `activate()` call).
+- Findings #4–#6 above (unbounded response size, multi-write non-atomicity,
+  fingerprint-seeding TOCTOU) are accepted limitations, not bugs to
+  rediscover and "fix" later without a genuinely new design discussion —
+  same treatment as Phase 2's clock+watermark co-tampering limitation.
+- The Phase 2 carry-forward item about documenting clock+watermark
+  co-tampering in ARCHITECTURE.md is still pending, still needs explicit
+  user approval before editing — not touched this phase either.
+- `refresh()`'s `STALE_TOKEN_REPLAY`/`INSTALLATION_ID_MISMATCH`/
+  `MALFORMED_RESPONSE` are synthetic `KeyforgeApiError` codes (not from
+  Keyforge's own error vocabulary) — if `index.js` or the README ever
+  document a full error-code table for integrators, these three need to be
+  called out as client-side-detected, not server-reported.
