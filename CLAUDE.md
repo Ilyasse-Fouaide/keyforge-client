@@ -4,9 +4,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Current state
 
-This repo contains only `ARCHITECTURE.md` — a proposal document, not yet approved for implementation. There is no `package.json`, no source, no tests, and no commits (working tree is untracked). **Do not scaffold or write code here until the user has explicitly approved the plan in `ARCHITECTURE.md`** (its own final line says as much: "Waiting on your approval (or pushback) before starting Phase 0").
+Phase 0 (scaffold) is complete — see `PROGRESS.md` for what shipped and the decisions made along the way; check it first, since it supersedes this section as later phases land. Work proceeds phase by phase per `ARCHITECTURE.md` §13 — don't jump ahead to a later phase's scope.
 
-Once implementation begins, a `PROGRESS.md` will track phase-by-phase status — check it first if it exists, since it will supersede this section's "nothing built yet" description.
+## Commands
+
+- `npm test` / `npm run test:watch` — Vitest
+- `npm test -- tests/unit/placeholder.test.js` — single file
+- `npm test -- -t 'name of test'` — single test by name
+- `npm run lint` / `npm run lint:fix` — ESLint
+- `npm run format` / `npm run format:check` — Prettier (Markdown is intentionally excluded)
 
 ## What this project is
 
@@ -27,7 +33,7 @@ Planned public API (ARCHITECTURE.md §4): `activate(licenseKey)`, `getEntitlemen
 
 ## Planned architecture (ARCHITECTURE.md §2, §5, §11)
 
-```
+```text
 src/
 ├── activate.js / refresh.js / deactivate.js   # network operations
 ├── entitlement.js       # getEntitlement(): local verification composition
@@ -40,6 +46,7 @@ src/
 ```
 
 Key decisions already made in the doc (don't relitigate without flagging it first):
+
 - **Default storage is a plain JSON file, not SQLite** — deliberately corrected from an earlier draft. Two strings (entitlement token, installation token), no queries — SQLite would add native-binary install friction (`better-sqlite3`) for no benefit. The adapter interface stays generic/pluggable so an integrator with their own DB can swap it in.
 - **Embedded public key(s) come from config passed at init, not hardcoded** — mirrors Keyforge's own public-key-manifest approach, so a server-side key rotation doesn't force a new release of this module.
 - **Revocation propagation is bounded by design, not a bug**: `getEntitlement()` run purely offline cannot know about revocation since the last successful `refresh()`. This is inherited from Keyforge's own architecture and must be documented in this module's README, not "fixed" here.

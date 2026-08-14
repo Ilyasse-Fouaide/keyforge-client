@@ -1,0 +1,10 @@
+node_modules/
+coverage/
+package-lock.json
+
+# Machine-local tool state, not project source. Gitignored, so failing
+# format:check on it is noise that has nothing to do with the codebase.
+.claude/
+
+# Docs are hand-authored — keep Prettier from reflowing them.
+*.md

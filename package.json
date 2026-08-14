@@ -1,0 +1,32 @@
+{
+  "name": "keyforge-client",
+  "version": "0.1.0",
+  "description": "Offline-safe license client for Keyforge-protected branch installations",
+  "type": "module",
+  "private": true,
+  "license": "UNLICENSED",
+  "main": "./src/index.js",
+  "exports": "./src/index.js",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
+  },
+  "dependencies": {
+    "jose": "^6.2.8"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "eslint": "^10.8.1",
+    "eslint-config-prettier": "^10.1.8",
+    "globals": "^17.9.0",
+    "prettier": "^3.9.6",
+    "vitest": "^4.1.10"
+  }
+}
