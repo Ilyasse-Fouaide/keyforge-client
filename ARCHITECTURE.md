@@ -65,6 +65,7 @@ getEntitlement()
 //   { status: 'revoked' }       // only detectable once refresh() has run since
 //                                 revocation — see §7's propagation note
 //   { status: 'tampered' }
+//   { status: 'unknown_key_version' } // token's kid isn't in this module's configured publicKeys
 //   { status: 'clock_rollback' }
 //   { status: 'not_activated' } // no stored token at all
 // This module REPORTS state. It does not decide what the calling app does
@@ -122,6 +123,8 @@ This is a **port, not a copy-paste**: `verify.js` currently imports `jose` and K
 ## 7. Revocation propagation — a real limitation to document, not solve here
 
 Per Keyforge's own §5: revocation propagates only when a client successfully reaches the server (i.e., when `refresh()` succeeds), bounded by the entitlement token's expiry window. This module inherits that limitation by construction — `getEntitlement()` alone, run purely offline, cannot know about a revocation that happened after the last successful `refresh()`. This is not a bug to fix in this module; it's the documented trade-off Keyforge's architecture already made deliberately. Worth stating explicitly in this module's own README so an integrator doesn't mistake "revoked but still reporting valid offline" for a defect.
+
+**A related, structurally similar limitation**: the clock-rollback watermark (`lastValidatedAt`, §6) lives in the same plaintext, unauthenticated local file as the entitlement token itself. It protects against a *naive* clock rollback but not against an attacker who edits both together — no local, secret-free value can defend against a party who can already edit the file storing it. Same local-filesystem-is-the-trust-boundary limitation §5 already accepts for the installation token, now applying to the rollback watermark too.
 
 ---
 

@@ -2,7 +2,7 @@
 
 Running status log. See `ARCHITECTURE.md` for design decisions and the phase plan (§13).
 
-**Current state: Phase 1 complete.**
+**Current state: Phase 2 complete.**
 
 ---
 
@@ -80,3 +80,144 @@ Verified end-to-end:
 
 - §15's other two open questions are still open: exact public-key init shape (§8), exact error/status vocabulary mapping (§9). Propose these explicitly before Phase 2/3 implementation, don't guess.
 - Phase 2's `entitlement.js` will be the first real consumer of `createJsonFileAdapter`/`createMemoryAdapter` — inject the memory adapter in its unit tests rather than hitting disk, per §10.
+
+---
+
+## Phase 2 — Local verification: crypto + clock + getEntitlement() ✅
+
+Ported `verifyEntitlementToken` (`src/crypto/verify.js`, `src/crypto/errors.js`)
+and `assertNoClockRollback` (`src/clock/rollback.js`) line-by-line from
+Keyforge server's `src/crypto/verify.js`/`errors.js` and
+`tests/helpers/offlineClock.js`, via fresh subagent re-reads immediately
+before each was written (not from an earlier paraphrase in the same
+session). Composed them in `src/entitlement.js`'s `createEntitlementChecker()`,
+translating the reference's exception-based contract into this module's own
+status-object vocabulary. Resolves §15's other two open questions (public-key
+init shape, error/status mapping). Full offline-flow scenario suite per §10,
+plus a mandatory fresh-context adversarial security review that found two
+confirmed, PoC-verified issues beyond the original plan — both handled before
+considering this phase done (details below). No `activate`/`refresh`/
+`deactivate` or `index.js` work — that's Phases 3-4.
+
+Verified end-to-end:
+
+- `npm test` — 81 passing across 6 files (was 34 after Phase 1)
+- `npm run lint` / `npm run format:check` — clean
+- Manual sanity check (ad hoc script, deleted after): a real Ed25519-signed
+  token, driven through the real `createJsonFileAdapter` (real disk, temp
+  dir) end-to-end through `createEntitlementChecker` — confirms `state.json`
+  grows a `lastValidatedAt` key after a `valid` check
+- Manual PoC re-verification (ad hoc script, deleted after): re-ran the
+  security review's stale-token-replay scenario directly against `src/`
+  (not just the new unit tests) and confirmed it now reports `tampered`
+  instead of `valid`
+
+### Decisions made during Phase 2
+
+| Decision | Rationale |
+|---|---|
+| **Public-key init shape (closes §15/§8): inline PEM strings**, `{ publicKeys: { '1': '<PEM>' } }`, passed to `createEntitlementChecker()` and converted once via a new `src/crypto/keys.js` (`loadPublicKeys`, not a port) using `jose`'s `importSPKI` | This module never does file I/O for keys itself — the integrator supplies resolved PEM content however they already manage config. Matches Phase 1's "build the minimal shape now" precedent (plain JSON storage instead of SQLite) rather than porting the server's file-manifest loader and its relative-path-resolution questions. User-approved before implementation. |
+| **Status vocabulary (closes §15/§9): +`unknown_key_version`**, mapped from `UnknownKeyVersionError` | Preserves the distinction the server's own client-SDK doc draws ("stale embedded key, needs a config update" vs. `tampered`'s "fraudulent token") — different operator response. Required and received an explicit, scoped `ARCHITECTURE.md` §4 edit (one line) before implementation, user-approved. All other collapsing (malformed structure, bad signature, schema violations, keyVersion/kid mismatch → `tampered`) is inherited unchanged from the server's own `TokenInvalidError` design. |
+| **`getEntitlement()` ratchets `lastValidatedAt` forward** on every check where the clock check passes, regardless of the token's own verify outcome | Without this, rollback protection only guards against rolling back before the *last server refresh*, not the last local check. `getEntitlement()` stays network-free but is no longer read-only against storage — user-approved trade-off. |
+| **New third storage key, `lastValidatedAt`, string-encoded unix seconds** | Follows the existing `StorageAdapter` contract (`get`/`set` are string-only, per `assertValidValue`). Missing (`null`) is passed through as `null`, never coerced via `Number(null)` (which is `0`, a finite number) — that coercion would silently defeat the fail-closed guard for "token exists but no watermark was ever written" (the state before Phase 3's `activate()` runs). This exact hazard has its own test. |
+| **`getNow` injection seam**, defaulting to `() => Math.floor(Date.now()/1000)`, passed once at `createEntitlementChecker()` construction (not per-call) | Lets tests control "now" deterministically without faking global timers, consistent with `storage`/`publicKeys` also being construction-time dependencies. |
+| **No `zod` dependency; `assertValidPayloadShape` in `verify.js` checks only `expiresAt`** instead of porting the server's full `entitlementTokenSchema` | Repo is deliberately dependency-light (`jose` only). Signature verification already proves authenticity; the server validated shape at signing time. Only `expiresAt` is checked because it's the only field this client's logic dereferences before a throw/no-throw decision — `now > payload.expiresAt` is `false` (not expired) for a missing/non-numeric `expiresAt`, the same silent-permissive-fallthrough shape as the clock-rollback bug this guards against by the same technique (`Number.isFinite`, not a bare comparison). `keyVersion` needs no separate check (`String(undefined)` can't match a real `kid`). `features` is passed through with zero shape validation — safe (never branched on locally) but a conscious scope boundary. |
+| **`rollback.js`, not `offlineClock.js`** (the source file's name) | "Offline" described the *source's* context (a test helper for an offline-flow suite, with no in-repo caller — explicitly reference-only code there); here it's real production code, and the name should describe what it does. |
+| **`src/crypto/keys.js` is new code, not a port** — Keyforge server's own `keys.js` (file-manifest loader) was read for shape reference only, never ported | Follows directly from the public-key init shape decision above: no file I/O, no manifest, no relative-path resolution to replicate. |
+| **Storage errors always propagate, never map to a status** — confirmed by a dedicated test (corrupt `state.json` via the real `json-file` adapter → `getEntitlement()` rejects with `SyntaxError`, not any status object) | Matches Phase 1's own "corrupted JSON throws, never silently resets" philosophy; an unexpected error becoming a plausible-looking status (e.g. `tampered`) would be worse than a loud crash. |
+
+### Security review — findings and disposition
+
+A fresh-context adversarial subagent review (the packaged `security-review`
+skill couldn't run here — its preamble hard-codes a `git log origin/HEAD...`
+diff and this repo has no remote configured; adding one to work around it
+would mean editing git config, which is off-limits, so the equivalent review
+was run directly via a briefed subagent instead) found two confirmed,
+PoC-verified issues and one low-severity code-quality note, none of which
+were anticipated in the original plan:
+
+1. **Fixed — stale/superseded token replay.** Neither `verify.js` nor
+   `entitlement.js` compared a token's `issuedAt` against anything
+   remembered locally, so restoring an old-but-still-validly-signed,
+   still-unexpired `entitlementToken` file (e.g. one saved before a
+   plan downgrade) verified cleanly as `valid` — no clock tampering
+   required, just a second file. Fixed by adding a second watermark,
+   `highestIssuedAtSeen` (same string-encoded-unix-seconds pattern as
+   `lastValidatedAt`, same file), checked and ratcheted in
+   `entitlement.js` right after a *successful* signature verification: a
+   `payload.issuedAt` behind the watermark reports `tampered`; otherwise
+   the watermark advances. Unlike `lastValidatedAt`, a missing
+   `highestIssuedAtSeen` is **not** fail-closed — the first token an
+   installation ever verifies has nothing prior to compare against, so
+   absence just means "nothing seen yet," not "something is wrong."
+   Verified both by new tests (`tests/offline-flow/getEntitlement.test.js`,
+   "stale token replay protection" block) and by re-running the review's
+   own PoC script directly against `src/` after the fix.
+2. **Documented as an accepted limitation, not fixed — clock+watermark
+   co-tampering.** An attacker with the filesystem write access the
+   project's own threat model already grants (§5: "whoever has access to
+   that machine already controls the ... system running on it") can roll
+   the OS clock back *and* edit the plaintext `lastValidatedAt` down to
+   match in the same stroke, defeating both the rollback check and the
+   expiry check together for an otherwise-genuine, untampered token. There
+   is no proportionate software fix within this module's stated
+   constraints (dependency-light, no hardware anchor) — any local,
+   secret-free value is exactly as editable as the one it's meant to
+   protect. This is the same shape as §7's already-accepted
+   revocation-propagation trade-off, just now concretely demonstrated
+   rather than theoretical. The pre-fix code comment overclaimed what the
+   watermark achieves ("closes the gap ... would otherwise look valid
+   again," stated unconditionally); corrected to name the naive-rollback
+   case it actually closes and the co-tampering case it does not.
+   **Proposing, not self-approving:** an `ARCHITECTURE.md` addition near
+   §5/§7 documenting this explicitly (mirroring §7's own treatment) — flagged
+   to the user, not made, since only the one pre-approved §4 edit was
+   authorized this phase.
+3. **Fixed — bare `catch` around the clock check.** Tightened to match the
+   verification `catch` block's pattern (`instanceof TypeError \|\|
+   instanceof ClockRollbackDetectedError`, rethrow anything else). Not
+   currently exploitable (`assertNoClockRollback` can only throw those two
+   types today), but was a latent trap for a future change to that file.
+
+Also explicitly tried and ruled out by the reviewer: algorithm-confusion,
+prototype-pollution-style key names (the `Map` keying rules this out
+structurally), non-string values written directly to the storage file
+bypassing `assertValidValue`, and cross-process file races (already
+out-of-scope per Phase 1's one-process-owns-this-file design).
+
+### Carry-forward — things later phases must not forget
+
+- **Phase 3's `activate()` must write an initial `lastValidatedAt` on
+  success**, or every `getEntitlement()` call post-activation fails closed
+  (`clock_rollback`) forever — there's no other way to bootstrap the
+  watermark. `getEntitlement()` self-sustains it thereafter; `refresh()`
+  doesn't strictly need to touch it.
+- **Phase 3's `activate()` should also seed `highestIssuedAtSeen`** with the
+  newly-activated token's own `issuedAt`, for the same reason and by the
+  same pattern as `lastValidatedAt` above (harmless if omitted — the field
+  fails open on first use — but seeding it is the more consistent,
+  slightly-more-defensive choice).
+- `revoked` still has no producing mechanism (e.g. a stored revocation flag
+  `refresh()` could set after a 403) — Phase 3's to design; Phase 2
+  deliberately built no hook for it.
+- **`installationId` is never checked locally** — a validly-signed token for
+  a *different* installation would currently verify `valid` here. Not
+  closeable in Phase 2: there's nothing yet recording what this
+  installation's own `installationId` should be. Phase 3's `activate()`
+  should store the expected `installationId` so `entitlement.js` can
+  compare against it.
+- **Clock+watermark co-tampering** (security review finding #2 above) is a
+  documented, accepted limitation, not a bug — don't attempt a local
+  software fix without a genuinely new primitive (e.g. a monotonic-clock
+  cross-check) being explicitly discussed and approved first; don't
+  rediscover this and "fix" it with something that only adds false
+  confidence.
+- A narrow, bounded, non-attacker-exploitable race exists if `getEntitlement()`
+  is ever called concurrently on the same checker instance (two reads of a
+  stale watermark could write back out of order) — documented limitation,
+  not fixed now; would need an atomic compare-and-swap primitive Phase 1's
+  `StorageAdapter` contract doesn't have. Applies to both `lastValidatedAt`
+  and the new `highestIssuedAtSeen`.
+- An `ARCHITECTURE.md` addition documenting the clock+watermark limitation
+  (see security review finding #2) is proposed but not yet made — needs
+  explicit user approval before editing, per this repo's own rule.
