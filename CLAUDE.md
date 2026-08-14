@@ -4,12 +4,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Current state
 
-Phase 0 (scaffold) is complete — see `PROGRESS.md` for what shipped and the decisions made along the way; check it first, since it supersedes this section as later phases land. Work proceeds phase by phase per `ARCHITECTURE.md` §13 — don't jump ahead to a later phase's scope.
+Phase 1 (storage adapter interface + default JSON-file implementation) is complete — see `PROGRESS.md` for what shipped and the decisions made along the way; check it first, since it supersedes this section as later phases land. Work proceeds phase by phase per `ARCHITECTURE.md` §13 — don't jump ahead to a later phase's scope.
 
 ## Commands
 
 - `npm test` / `npm run test:watch` — Vitest
-- `npm test -- tests/unit/placeholder.test.js` — single file
+- `npm test -- tests/unit/storage/json-file.test.js` — single file
 - `npm test -- -t 'name of test'` — single test by name
 - `npm run lint` / `npm run lint:fix` — ESLint
 - `npm run format` / `npm run format:check` — Prettier (Markdown is intentionally excluded)
@@ -40,18 +40,19 @@ src/
 ├── crypto/              # ported verify.js equivalent (jose, same lib as server)
 ├── clock/               # ported offlineClock.js equivalent
 ├── storage/
-│   ├── adapter.js       # interface: get(key)/set(key,value)/delete(key)
-│   └── json-file.js     # default implementation — a plain JSON file, NOT SQLite
+│   ├── adapter.js       # StorageAdapter contract + assertValidKey/assertValidValue — done (Phase 1)
+│   └── json-file.js     # createJsonFileAdapter() — done (Phase 1)
 └── index.js             # public API surface
 ```
 
 Key decisions already made in the doc (don't relitigate without flagging it first):
 
 - **Default storage is a plain JSON file, not SQLite** — deliberately corrected from an earlier draft. Two strings (entitlement token, installation token), no queries — SQLite would add native-binary install friction (`better-sqlite3`) for no benefit. The adapter interface stays generic/pluggable so an integrator with their own DB can swap it in.
+- **Storage is a single flat file, `{ [key]: value }`, default path `<cwd>/.keyforge-client/state.json`, overridable via `filePath`** (Phase 1, closes §15's third open question — see `PROGRESS.md`'s Phase 1 section for the full rationale). `createJsonFileAdapter()` serializes concurrent calls in-process and writes atomically (temp file + rename); a matching in-memory fake lives at `tests/helpers/memoryAdapter.js` for later phases' tests to inject instead of touching disk.
 - **Embedded public key(s) come from config passed at init, not hardcoded** — mirrors Keyforge's own public-key-manifest approach, so a server-side key rotation doesn't force a new release of this module.
 - **Revocation propagation is bounded by design, not a bug**: `getEntitlement()` run purely offline cannot know about revocation since the last successful `refresh()`. This is inherited from Keyforge's own architecture and must be documented in this module's README, not "fixed" here.
 
-Three things are explicitly open design questions, not yet decided (§15): the exact public-key init shape, the exact error/status vocabulary mapping, and the exact JSON storage file layout/path convention. Propose these explicitly before implementing rather than guessing.
+Two things are still explicitly open design questions, not yet decided (§15): the exact public-key init shape and the exact error/status vocabulary mapping. Propose these explicitly before implementing rather than guessing.
 
 ## Workflow
 
