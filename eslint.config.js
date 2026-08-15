@@ -24,6 +24,14 @@ export default [
       'prefer-const': 'error',
     },
   },
+  {
+    // CLI tooling, not the library itself — console output is the entire
+    // point, unlike src/'s general library hygiene rule.
+    files: ['examples/**/*.js'],
+    rules: {
+      'no-console': 'off',
+    },
+  },
   // Must stay last: turns off stylistic rules that would fight Prettier.
   prettier,
 ];

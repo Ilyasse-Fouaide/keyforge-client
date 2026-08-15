@@ -438,3 +438,61 @@ non-atomicity, `installationFingerprint`-seeding TOCTOU, the narrow
 concurrent-`getEntitlement()` watermark race) are deliberate, documented
 trade-offs — not bugs for a future session to rediscover and "fix" without
 a genuinely new design discussion first.
+
+---
+
+## Addendum — `examples/` verification suite ✅
+
+Not one of ARCHITECTURE.md §13's four phases (the module itself was already
+complete after Phase 4) — additive tooling, same treatment the Keyforge
+server repo gave its own `VERIFICATION.md`/`e2e/dashboard-smoke.js`. Adds
+`examples/`: `setup-fixtures.js`/`teardown-fixtures.js` (create/sweep a real
+Product→Plan→Customer→Subscription→License chain via Keyforge's admin API,
+name-prefixed `KFC Example`), six numbered scenario scripts under
+`examples/scenarios/` that walk one simulated branch installation through its
+lifecycle against a real running Keyforge server (first activation, a
+simulated reboot/offline check, background refresh, admin-triggered
+revocation, deactivate/reactivate, and direct on-disk tampering), and
+`run-all.js` to drive all of it plus print a pass/fail summary. Full setup and
+troubleshooting docs in `examples/README.md`. No ARCHITECTURE.md changes — no
+design decisions were revisited.
+
+Verified end-to-end, against a real running Keyforge server + its existing
+local MongoDB (not mocked, not assumed):
+
+- `npm run examples:run-all` — all six scenarios plus setup/teardown pass,
+  real Ed25519-signed tokens verified over a real network round trip.
+- Ran the full suite twice back to back with no manual cleanup in between —
+  confirms genuine re-runnability (see the permanent-residue finding below,
+  which is why this needed a design change mid-implementation).
+- Each scenario script run individually and standalone, in order.
+- Ran a scenario out of order (03 before 01) against a clean `.state/` —
+  confirmed the "run 01 first" guidance error, not a stack-trace crash.
+- Triggered `REGISTRATION_CLOSED` directly (wrong password against the
+  server's existing dev admin) — confirmed the actionable error message.
+- `npm run lint` / `npm run format:check` — clean.
+
+### Decisions made
+
+| Decision | Rationale |
+|---|---|
+| **Shared sequential installation, not independent fixtures per scenario** — one `Product`/`Plan`/`Customer`/`Subscription`/`License` chain, one on-disk `examples/.state/state.json` used across all six scenarios in strict numeric order | User-approved (of two proposed options). Matches the task's own framing (`run-all.js` runs scenarios "in sequence", 06's destructive tampering is deliberately last, 05's "fingerprint survived" check only means something if it's surviving from an earlier point in a real lifecycle). Each script still independently runnable as a standalone `node` command — it self-checks its prerequisite via `requireExistingState()` and exits with a clear "run 0N first" message rather than a confusing crash if run out of order. |
+| **Admin auth: login, falling back to one-time bootstrap registration, both via the same `KEYFORGE_ADMIN_EMAIL`/`PASSWORD` env vars** (`examples/lib/adminApiClient.js`'s `createAdminSession`) | Matches the task's explicit ask ("bootstrap or existing admin creds via env vars"), no interactive prompt. Keyforge server itself has no admin-credentials env var or non-HTTP bootstrap other than its own DB-direct `create-admin`/`delete-admin` scripts (confirmed by reading its source) — `POST /admin/auth/register` only succeeds once, while zero admins exist, so this suite tries login first and only attempts registration on a `401`, surfacing a clear actionable error on `403 REGISTRATION_CLOSED` (credentials don't match an admin that already exists) rather than a cryptic one. |
+| **Name-prefix (`KFC Example`) + sweep-before-and-after convention**, `sweepFixtures()` shared by both `setup-fixtures.js` and `teardown-fixtures.js` | Directly reuses the pattern found in Keyforge server's own `VERIFICATION.md`/`e2e/dashboard-smoke.js` (its `PW`-prefix convention), per the task's explicit instruction to give this "the same treatment." Discovers fixtures by name rather than trusting one run's own ID bookkeeping, so it's self-healing against a crashed prior run and safe to point at a real shared dev database. |
+| **`sweepFixtures()` best-effort deactivates the recorded installation (via the real `deactivate()` public API) before attempting to delete its License** | Worth doing regardless of the finding below: it's the correct real-world cleanup action and frees the License's `activationsUsed` slot count server-side, even though (see below) the row itself can't actually be deleted afterward. Scenario 06 deliberately corrupts only the stored `entitlementToken` (not `installationToken`), specifically so this step still works afterward. |
+| **Confirmed against the real server (an assumption in the original plan turned out wrong): an activated License's whole fixture chain can never be deleted through the admin API, ever** — `deactivateInstallation()` only sets the Activation's `status` to `'deactivated'`, never deletes the row, and the delete-guard's dependents query (`{ licenseId: id }`, `src/services/license.service.js`) counts Activations regardless of status; there is no admin route to delete an Activation directly. Fixed by giving every run's `Product`/`Plan`/`Customer`/`Subscription` a unique `Date.now()`-suffixed name/slug (`kfc-example-<runId>`), not a fixed one | The original plan assumed `deactivate()` before delete would free the guard — reasonable from reading the docs, wrong in practice, caught only by actually running the suite against a live server rather than stopping at lint-clean. A fixed slug would have collided with the previous run's now-permanently-undeletable `Product` on every second run, breaking the "re-runnable from scratch" claim entirely. `teardown-fixtures.js` now reports each undeletable row plainly (`Not deleted (HAS_DEPENDENTS): ...`) plus one summary note, rather than an alarming warning — same category of accepted residue as Keyforge server's own `ApiKey`/`AuditLog` rows (also delete-less), per its `VERIFICATION.md`. Documented in `examples/README.md`'s own "confirmed, permanent limitation" section. |
+| **Scenario 05 un-revokes the license via the admin API before its final `activate()` call** — not in the task's literal scenario description | Necessary correction found while cross-referencing Keyforge's own error table: `LICENSE_REVOKED` (403) blocks `activate()`, not just `refresh()`/`validate()`. Since scenario 04 leaves the fixture license revoked and nothing else in the flow restores it, omitting this step would make 05's final "activate() again" fail. Documented explicitly in `examples/README.md` as a deliberate addition, not a silent deviation. |
+| **`examples/lib/scenario.js`'s `check()`/`run()` — plain `console.log`/exit-code checks, no test framework** | Mirrors Keyforge server's own `e2e/dashboard-smoke.js` convention exactly (plain Node + `PASS`/`FAIL` lines): Vitest is reserved for the real `tests/` suite; this is a runnable-against-a-live-server script, a different kind of artifact. |
+| **`run-all.js` spawns each step as a real child process** (`node:child_process`'s `spawnSync`), not an in-process function call | Makes 02-reboot-offline-check.js's "new process" claim genuinely true even when driven by the orchestrator, and keeps one script's crash from taking down the whole run. Stops the scenario loop at the first failure (later scenarios assume earlier ones succeeded) but always still runs `teardown-fixtures.js` afterward, since the prefix-based sweep cleans up partial state safely regardless of where a run stopped. |
+| **No `dotenv` dependency** — `examples/lib/env.js` uses Node's built-in `process.loadEnvFile()` | Consistent with the module's existing dependency-light stance (`jose` is still the only runtime dependency); Node's engines field is already `>=24`, well past `process.loadEnvFile`'s availability. |
+| **`examples/.env` and `examples/.state/` gitignored**; `eslint.config.js` gets a `no-console: 'off'` override scoped to `examples/**/*.js` | The former are runtime artifacts (real credentials, a real on-disk license state file), not checked-in fixtures. The latter reflects that this is CLI tooling whose entire purpose is console output, unlike `src/`'s general library-hygiene reasoning for keeping that rule on (Phase 0's own decision, PROGRESS.md above) — scoped narrowly rather than changed repo-wide. |
+
+### Carry-forward — none new
+
+This addendum doesn't change any of the four phases' carry-forward items
+above. `examples/` has no bearing on the library's own runtime behavior — it
+only consumes the public API (`createKeyforgeClient` from the package's own
+entry point) plus, for harness purposes only, the non-exported
+`createJsonFileAdapter` via a relative import (not part of the package's
+public `exports` surface, since only `src/index.js` is reachable from
+outside).

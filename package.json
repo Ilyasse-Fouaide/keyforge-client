@@ -16,7 +16,10 @@
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "format": "prettier --write .",
-    "format:check": "prettier --check ."
+    "format:check": "prettier --check .",
+    "examples:setup": "node examples/setup-fixtures.js",
+    "examples:teardown": "node examples/teardown-fixtures.js",
+    "examples:run-all": "node examples/run-all.js"
   },
   "dependencies": {
     "jose": "^6.2.8"

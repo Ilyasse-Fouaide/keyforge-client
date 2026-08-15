@@ -3,6 +3,9 @@ package-lock.json
 
 .keyforge-client/
 
+examples/.env
+examples/.state/
+
 coverage/
 .vitest/
 *.log
