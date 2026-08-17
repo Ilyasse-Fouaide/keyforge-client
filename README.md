@@ -27,7 +27,7 @@ const client = await createKeyforgeClient({
 await client.activate(licenseKey);
 
 // On every app boot. Network-free, never throws for expected bad states.
-const entitlement = client.getEntitlement();
+const entitlement = await client.getEntitlement();
 if (entitlement.status !== 'valid') {
   // degraded mode vs. hard stop is your app's call, not this module's
 }
@@ -48,7 +48,7 @@ await client.deactivate();
 |---|---|---|---|
 | `publicKeys` | Yes | — | `{ [keyVersion]: pemString }`. Keyforge's Ed25519 public key(s), keyed by `keyVersion` for rotation. Config, not hardcoded, so a server-side key rotation doesn't force a new release of this module. |
 | `baseUrl` | Yes | — | Keyforge server base URL, e.g. `https://licensing.example.com`. |
-| `storage` | No | a JSON-file adapter at `<cwd>/.keyforge-client/state.json` | Any object implementing the `StorageAdapter` interface (`get`/`set`/`delete`, all `Promise`-returning). The default is a plain JSON file — no SQLite, no native-binary install friction. If your backend already manages its own database, implement `StorageAdapter` against it instead; pass an explicit instance (e.g. `createJsonFileAdapter({ filePath })`) to change the default file's location. |
+| `storage` | No | a JSON-file adapter at `<cwd>/.keyforge-client/state.json` | Any object implementing the `StorageAdapter` interface (`get`/`set`/`delete`, all `Promise`-returning). The default is a plain JSON file — no SQLite, no native-binary install friction. If your backend already manages its own database, implement `StorageAdapter` against it instead; pass an explicit instance (e.g. `import { createJsonFileAdapter } from 'keyforge-client'; createJsonFileAdapter({ filePath })`) to change the default file's location. |
 | `getNow` | No | real clock (unix seconds) | Injectable clock seam, mainly useful for tests. |
 | `fetchImpl` | No | global `fetch` | Injectable fetch seam, mainly useful for tests. |
 

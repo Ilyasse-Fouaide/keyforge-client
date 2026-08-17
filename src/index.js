@@ -31,6 +31,8 @@ import { createJsonFileAdapter } from './storage/json-file.js';
  *   deactivate: () => Promise<void>,
  * }>}
  */
+export { createJsonFileAdapter };
+
 export async function createKeyforgeClient({
   storage = createJsonFileAdapter(),
   publicKeys,

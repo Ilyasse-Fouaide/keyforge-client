@@ -496,3 +496,21 @@ entry point) plus, for harness purposes only, the non-exported
 `createJsonFileAdapter` via a relative import (not part of the package's
 public `exports` surface, since only `src/index.js` is reachable from
 outside).
+
+---
+
+## Post-release fixes — found via external consumer ✅
+
+Two documentation/packaging bugs, both found by a MenuForge session (a real
+consumer of this package) reading the actual source because the README's own
+guidance didn't work as written — same category as Keyforge server's own
+License-deletion finding (caught by actually using the thing, not by
+lint/tests alone).
+
+| Issue | Fix | Rationale |
+|---|---|---|
+| README Quick Start's `const entitlement = client.getEntitlement();` was missing `await` | Added `await` | `getEntitlement` is `async` (`src/entitlement.js`, bound through in `src/index.js`) — the unawaited call assigned a `Promise` to `entitlement`, making `entitlement.status` read as `undefined` in the exact snippet meant to be copy-pasted. |
+| README's Configuration table told integrators to pass `createJsonFileAdapter({ filePath })` to customize the storage location, but the function was never reachable from outside the package — `package.json`'s `"exports": "./src/index.js"` (bare string) blocks all subpath imports, and `createJsonFileAdapter` wasn't re-exported from `index.js` either | Re-exported `createJsonFileAdapter` from `src/index.js`; updated the README's example to `import { createKeyforgeClient, createJsonFileAdapter } from 'keyforge-client'`. `package.json`'s single-entry-point `exports` field is unchanged. | Two fixes were possible: open a subpath export (`./storage/json-file.js`) in `package.json`, or re-export the function from `index.js`. User-approved the latter — it fixes the actual defect (the function is now reachable) without making `src/storage/json-file.js`'s file location part of the public contract, and it's additive to Phase 4's deliberate "index.js is the only externally-reachable file" decision rather than a reversal of it (that decision was about not re-exporting the four *internal lifecycle* factories — `createJsonFileAdapter` isn't one of those four, and the README already documented calling it directly). |
+
+Verified end-to-end: `npm run lint` / `npm test` (118 passing, unchanged)
+still clean after the `index.js` export addition.
