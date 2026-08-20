@@ -514,3 +514,86 @@ lint/tests alone).
 
 Verified end-to-end: `npm run lint` / `npm test` (118 passing, unchanged)
 still clean after the `index.js` export addition.
+
+---
+
+## npm publishing ✅
+
+Not one of ARCHITECTURE.md §13's four phases — additive packaging work to
+make the already-complete library installable via `npm install
+keyforge-client` instead of only a git dependency or local path (per the
+"Relationship to Keyforge" section, this repo was always meant to be a
+standalone published module, not a subpackage of the server repo).
+
+### package.json changes
+
+| Field | Before | After | Rationale |
+|---|---|---|---|
+| `private` | `true` | *(removed)* | Blocks `npm publish` outright; had to go for a real publish. |
+| `license` | `"UNLICENSED"` | `"MIT"` | User-selected (explicitly confirmed, not invented) — public permissive license appropriate for a public npm package. |
+| `author` | *(absent)* | `"ilyasse-fouaide <ilyasse.fouaide@gmail.com>"` | User-confirmed exact string, matching `git config user.email`. |
+| `repository` / `homepage` / `bugs` | *(absent)* | derived from the existing `origin` git remote (`github.com/Ilyasse-Fouaide/keyforge-client`) | User confirmed use of the existing remote rather than inventing a URL. |
+| `keywords` | *(absent)* | `license`, `licensing`, `entitlement`, `offline`, `ed25519`, `keyforge` | Registry discoverability; drawn from the existing description/README, not new claims. |
+| `files` | *(absent)* | `["src"]` | Without this, `npm pack`/`publish` fell back to `.gitignore` as its exclusion list, which would have shipped `tests/`, `examples/` (full live-server scenario scripts), `ARCHITECTURE.md`, `PROGRESS.md`, `CLAUDE.md`, and all dev tooling config. `package.json`/`README.md`/`LICENSE`/the main entry file are always included by npm regardless of `files`. |
+
+`version` (`0.1.0`), `engines` (`node >=24`), `main`/`exports`/`type`, and
+all `scripts`/`dependencies`/`devDependencies` were left unchanged —
+publishing didn't require touching the API or runtime behavior.
+
+### New file: `LICENSE`
+
+Standard MIT text, copyright `ilyasse-fouaide`, 2026.
+
+### README changes
+
+Replaced the "This package is `private: true`... install via git
+dependency or local path" note with an `## Installation` section
+(`npm install keyforge-client`), and added a one-line `## License` section
+pointing at MIT/the `LICENSE` file. No changes to the Quick Start code
+sample — it already imported from the bare `'keyforge-client'` specifier.
+
+### Verification performed
+
+1. `npm run format:check` / `npm run lint` / `npm test` — all clean, 118/118
+   tests passing, unchanged from pre-publish state.
+2. `npm pack --dry-run`, then a real `npm pack` — tarball contains exactly
+   16 files (`LICENSE`, `README.md`, `package.json`, all of `src/**`),
+   15.8 kB packed / 48.6 kB unpacked. Nothing from `tests/`, `examples/`,
+   or the markdown planning docs leaked in.
+3. **Local-tarball consumer test**: built the real `.tgz`, installed it
+   (`npm install <path-to-tgz>`) into a throwaway project outside this
+   repo, and ran a script importing `createKeyforgeClient` and
+   `createJsonFileAdapter` from `'keyforge-client'`. Confirmed: import
+   resolves, both are functions, the returned client exposes exactly the
+   four public methods (`activate`/`deactivate`/`getEntitlement`/
+   `refresh`), `getEntitlement()` on a fresh unactivated install returns
+   `{ status: 'not_activated' }` with no network call, and the `jose`
+   runtime dependency installs correctly alongside the package (2 packages
+   added total) — confirming the dependency graph resolves from a bare
+   tarball install, not just from this repo's dev `node_modules`.
+
+### Publish
+
+Published as `keyforge-client@0.1.0`, public, unscoped (name was
+confirmed unclaimed on the registry beforehand via a direct registry
+lookup). The account has 2FA set to `auth-and-writes`; the initial
+`npm publish` attempts failed (`E403`, then transient `E401`/`E404` during
+retries) because the interactive OTP challenge npm expects for
+publish-with-2FA couldn't complete automatically — the user resolved this
+by authenticating and publishing directly themselves from their own
+terminal.
+
+Post-publish verification:
+
+- `npm view keyforge-client version` → `0.1.0`.
+- `npm view keyforge-client --json` — confirms all package.json metadata
+  (license, author, repository, homepage, bugs, keywords, exports, deps)
+  landed on the registry as intended.
+- **Registry consumer test**: fresh throwaway project, `npm install
+  keyforge-client@0.1.0` (real registry install, not a local tarball),
+  same smoke script as above — passed identically.
+
+### Carry-forward — none
+
+Nothing about the library's runtime behavior or public API changed in this
+phase; this was packaging/metadata/distribution only.
