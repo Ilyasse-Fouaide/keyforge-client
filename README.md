@@ -10,8 +10,11 @@ server contact (`activate`/`refresh`/`deactivate`) is one-time or
 background. **The branch app must never block startup on a network call** —
 `getEntitlement()` never makes one.
 
-This package is `private: true` and not published to npm — install it via a
-git dependency or a local path.
+## Installation
+
+```bash
+npm install keyforge-client
+```
 
 ## Quick start
 
@@ -159,3 +162,7 @@ reviews):
 
 See `CLAUDE.md` for the full command list and `ARCHITECTURE.md`/
 `PROGRESS.md` for design decisions and phase-by-phase history.
+
+## License
+
+MIT — see [LICENSE](./LICENSE).

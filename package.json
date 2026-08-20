@@ -3,10 +3,29 @@
   "version": "0.1.0",
   "description": "Offline-safe license client for Keyforge-protected branch installations",
   "type": "module",
-  "private": true,
-  "license": "UNLICENSED",
+  "license": "MIT",
+  "author": "ilyasse-fouaide <ilyasse.fouaide@gmail.com>",
+  "homepage": "https://github.com/Ilyasse-Fouaide/keyforge-client#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Ilyasse-Fouaide/keyforge-client.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Ilyasse-Fouaide/keyforge-client/issues"
+  },
+  "keywords": [
+    "license",
+    "licensing",
+    "entitlement",
+    "offline",
+    "ed25519",
+    "keyforge"
+  ],
   "main": "./src/index.js",
   "exports": "./src/index.js",
+  "files": [
+    "src"
+  ],
   "engines": {
     "node": ">=24"
   },
