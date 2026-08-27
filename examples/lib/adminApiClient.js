@@ -225,24 +225,34 @@ export async function listCustomers(session) {
   const { data } = await session.request('GET', '/api/v1/admin/customers?limit=100');
   return data;
 }
+// The admin API's list endpoints take a JSON-encoded `filters` array of
+// `{ field, operator, value }` conditions (see the Keyforge server repo's
+// src/utils/advancedFilter.js), not flat `?<field>=<value>` query params —
+// `field` is the filter-field id from that resource's own *_FILTER_FIELDS
+// config (e.g. plan.service.js's PLAN_FILTER_FIELDS), not the underlying
+// Mongo field name.
+function filterQueryParam(field, value) {
+  return `filters=${encodeURIComponent(JSON.stringify([{ field, operator: 'is', value }]))}`;
+}
+
 export async function listPlansByProduct(session, productId) {
   const { data } = await session.request(
     'GET',
-    `/api/v1/admin/plans?productId=${productId}&limit=100`,
+    `/api/v1/admin/plans?${filterQueryParam('product', productId)}&limit=100`,
   );
   return data;
 }
 export async function listSubscriptionsByCustomer(session, customerId) {
   const { data } = await session.request(
     'GET',
-    `/api/v1/admin/subscriptions?customerId=${customerId}&limit=100`,
+    `/api/v1/admin/subscriptions?${filterQueryParam('customer', customerId)}&limit=100`,
   );
   return data;
 }
 export async function listLicensesBySubscription(session, subscriptionId) {
   const { data } = await session.request(
     'GET',
-    `/api/v1/admin/licenses?subscriptionId=${subscriptionId}&limit=100`,
+    `/api/v1/admin/licenses?${filterQueryParam('subscription', subscriptionId)}&limit=100`,
   );
   return data;
 }
